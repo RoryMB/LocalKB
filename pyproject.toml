@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "LocalKB"
+version = "1.0.0"
+description = "An MCP server for local knowledge base operations"
+authors = [
+    { name="Rory Butler" },
+]
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "aiohttp",
+    "chromadb",
+    "mcp",
+    "numpy",
+    "semantic-text-splitter",
+    "sentence-transformers",
+    "torch",
+    "transformers",
+]
+
+[project.scripts]
+localkb = "localkb.__main__:main"
+localkb_cli = "localkb.cli:main"
+
+[tool.setuptools]
+packages = ["localkb"]
