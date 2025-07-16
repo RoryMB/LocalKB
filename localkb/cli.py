@@ -11,11 +11,9 @@
 # ]
 # ///
 
-import asyncio
 from pathlib import Path
 
 from .tools import (
-    _kb_exists,
     _kb_path,
     add_text_to_kb,
     create_kb,
@@ -73,7 +71,7 @@ def main():
             query = input("Enter search query: ").strip()
 
             try:
-                results = asyncio.run(search_kb(kb_name, query))
+                results = search_kb(kb_name, query)
             except Exception as e:
                 print(f"Error: {e}")
                 continue
@@ -84,7 +82,6 @@ def main():
 
             print("\nSearch results:")
             for i, result in enumerate(results, 1):
-                print(f"\n{i}. Score: {result['score']}")
                 if result['metadata'] and 'source' in result['metadata']:
                     print(f"   Source: {result['metadata']['source']}")
                 content = result['content']
@@ -130,7 +127,7 @@ def main():
                     continue
 
                 # Add to knowledge base
-                result = asyncio.run(add_text_to_kb(kb_name, source_name, content))
+                result = add_text_to_kb(kb_name, source_name, content)
             except Exception as e:
                 print(f"Error: {e}")
                 continue
@@ -176,7 +173,7 @@ def main():
                     continue
 
                 # Add to knowledge base
-                result = asyncio.run(add_text_to_kb(kb_name, source_name, content))
+                result = add_text_to_kb(kb_name, source_name, content)
                 print(f"  {result}")
                 processed_count += 1
 
