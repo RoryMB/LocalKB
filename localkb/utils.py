@@ -402,6 +402,10 @@ def chunk_text(text: str, chunk_size: int = 3000, overlap: bool = True) -> list[
     if not overlap:
         return base_chunks
 
+    # If only one chunk, return it as-is
+    if len(base_chunks) == 1:
+        return base_chunks
+
     # Pair up chunks: (0+1), (1+2), (2+3), etc. for overlap
     paired_chunks = []
     for i in range(len(base_chunks) - 1):
