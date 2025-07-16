@@ -173,7 +173,7 @@ async def search_kb(kb_name: str, query: str, filters: Optional[dict] = None):
 
     Args:
         kb_name: Name of the knowledge base to search
-        query: Question to be answered
+        query: Search query string
         filters: Optional ChromaDB metadata filters to narrow search (e.g., {"source": "http://www.example.com"}, {"source": {"$contains": "example.com"}}]})
     """
     # Old arguments. Might put them back later.
