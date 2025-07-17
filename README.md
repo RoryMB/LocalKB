@@ -39,7 +39,13 @@ Expected timings, based on my M1 Max MacBook Pro:
 - `filters` (object, optional): Optional ChromaDB metadata filters to narrow search
 
 
-## Add to Claude Desktop
+## Add to Claude
+
+Add to your Claude Code MCP configuration:
+
+```bash
+claude mcp add-json -s user LocalKB '{"command": "uvx", "args": ["--from", "git+https://github.com/RoryMB/LocalKB@main", "localkb"]}'
+```
 
 Add to your Claude Desktop MCP configuration:
 
