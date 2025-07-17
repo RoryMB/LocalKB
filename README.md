@@ -2,6 +2,18 @@
 
 An MCP (Model Context Protocol) server for local knowledge base operations. LocalKB allows agents to create, manage, and search personal knowledge bases using semantic search and document chunking.
 
+Before using LocalKB, download the required models to avoid startup delays:
+
+```bash
+pip install huggingface-hub
+huggingface-cli download Qwen/Qwen3-Embedding-0.6B
+huggingface-cli download Qwen/Qwen3-Reranker-0.6B
+```
+
+Expected timings, based on my M1 Max MacBook Pro:
+- The first use of `add_text_to_kb` or `search_kb` in a session will load the models into memory, taking roughly 10 extra seconds.
+- Searches take roughly 10 seconds (results are retrieved in about 0.5 seconds, then the reranker model spends about 1.5-2 seconds to score each result.)
+
 ## Available Tools
 
 ### Knowledge Base Management
