@@ -72,6 +72,14 @@ uvx --from git+https://github.com/RoryMB/LocalKB@main localkb --cli
 
 ### Python Import
 
+Run Python files with this command if you do not want to clone the repo:
+
+```bash
+uv run --with git+https://github.com/RoryMB/LocalKB@main file.py
+```
+
+Example Python file:
+
 ```python
 from localkb.tools import (
     create_kb,
