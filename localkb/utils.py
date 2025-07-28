@@ -3,15 +3,10 @@ import os
 import re
 from pathlib import Path
 
+import torch
+
 # Disable ChromaDB telemetry
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
-import chromadb
-import numpy as np
-import torch
-from chromadb.config import Settings
-from semantic_text_splitter import TextSplitter
-from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class ChromaReranker:
@@ -57,6 +52,8 @@ class ChromaReranker:
     @property
     def embedding_model(self):
         """Lazy load the embedding model."""
+        from sentence_transformers import SentenceTransformer
+
         if self._embedding_model is None:
             self._embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
         return self._embedding_model
@@ -64,6 +61,8 @@ class ChromaReranker:
     @property
     def tokenizer(self):
         """Lazy load the tokenizer."""
+        from transformers import AutoTokenizer
+
         if self._tokenizer is None:
             self._tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-Reranker-0.6B", padding_side='left')
         return self._tokenizer
@@ -71,6 +70,8 @@ class ChromaReranker:
     @property
     def reranker_model(self):
         """Lazy load the reranker model."""
+        from transformers import AutoModelForCausalLM
+
         if self._reranker_model is None:
             self._reranker_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-Reranker-0.6B").eval()
         return self._reranker_model
@@ -151,6 +152,8 @@ class ChromaReranker:
 
     def _batch_process(self, items: list, batch_size: int, process_func, *args, **kwargs):
         """Generic function to process items in batches."""
+        import numpy as np
+
         all_results = []
 
         for i in range(0, len(items), batch_size):
@@ -169,7 +172,7 @@ class ChromaReranker:
             return np.concatenate(all_results, axis=0)
         return all_results
 
-    def _embed_batch(self, texts: list[str], prompt: str = None) -> np.ndarray:
+    def _embed_batch(self, texts: list[str], prompt: str = None):
         """Embed a batch of texts."""
         return self.embedding_model.encode(texts, prompt=prompt)
 
@@ -178,7 +181,7 @@ class ChromaReranker:
         inputs = self._process_rerank_inputs(pairs)
         return self._compute_rerank_scores(inputs)
 
-    def embed_queries(self, queries: list[str], instruction: str = "") -> np.ndarray:
+    def embed_queries(self, queries: list[str], instruction: str = ""):
         """Embed queries with the given instruction."""
         prompt = self._format_embed_prompt(instruction) if instruction else None
 
@@ -187,14 +190,14 @@ class ChromaReranker:
 
         return self._batch_process(queries, self.batch_size, self._embed_batch, prompt)
 
-    def embed_documents(self, documents: list[str]) -> np.ndarray:
+    def embed_documents(self, documents: list[str]):
         """Embed documents."""
         if len(documents) <= self.batch_size:
             return self.embedding_model.encode(documents)
 
         return self._batch_process(documents, self.batch_size, self._embed_batch)
 
-    def compute_similarity(self, query_embeddings: np.ndarray, document_embeddings: np.ndarray) -> torch.Tensor:
+    def compute_similarity(self, query_embeddings, document_embeddings) -> torch.Tensor:
         """Compute cosine similarity matrix between query and document embeddings."""
         return self.embedding_model.similarity(query_embeddings, document_embeddings)
 
@@ -225,6 +228,9 @@ class ChromaReranker:
 
     def _get_collection(self, kb_path: Path, collection_name: str = "documents"):
         """Get or create a ChromaDB collection at the specified path."""
+        import chromadb
+        from chromadb.config import Settings
+
         client = chromadb.PersistentClient(path=str(kb_path), settings=Settings(anonymized_telemetry=False))
         collection = client.get_or_create_collection(
             name=collection_name,
@@ -394,6 +400,8 @@ def chunk_text(text: str, chunk_size: int = 3000, overlap: bool = True) -> list[
     Returns:
         List of text chunks paired as (0+1), (1+2), (2+3), etc.
     """
+    from semantic_text_splitter import TextSplitter
+
     if overlap:
         chunk_size = chunk_size // 2
 
