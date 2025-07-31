@@ -20,6 +20,7 @@ dependencies = [
     "aiohttp",
     "chromadb",
     "mcp",
+    "mlx-lm",
     "numpy",
     "semantic-text-splitter",
     "sentence-transformers",
