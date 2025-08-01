@@ -4,34 +4,10 @@ import platform
 import re
 from pathlib import Path
 
-import torch
-
 # Disable ChromaDB telemetry
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 
-
-def is_apple_silicon() -> bool:
-    """
-    Detect if running on Apple Silicon (M1/M2/M3 etc.) Mac.
-    
-    Returns:
-        True if running on Apple Silicon, False otherwise
-    """
-    return platform.system() == 'Darwin' and platform.machine() == 'arm64'
-
-
-def is_mlx_available() -> bool:
-    """
-    Check if MLX library is available for import.
-    
-    Returns:
-        True if mlx-lm can be imported, False otherwise
-    """
-    try:
-        import mlx_lm
-        return True
-    except ImportError:
-        return False
+USE_MLX = platform.system() == 'Darwin' and platform.machine() == 'arm64'
 
 
 class ChromaReranker:
@@ -51,14 +27,7 @@ class ChromaReranker:
             max_length: Maximum sequence length for the reranker
             batch_size: Batch size for model operations
         """
-        self.max_length = max_length
-        self.batch_size = batch_size
-
-        # Determine model type once at initialization
-        # Temporarily disabled until proper MLX implementation is complete
-        self.use_mlx = False  # is_apple_silicon() and is_mlx_available()
-        
-        # Store model references
+        # Store model configuration
         self._embedding_model = None
         self._tokenizer = None
         self._reranker_model = None
@@ -66,6 +35,9 @@ class ChromaReranker:
         self._token_true_id = None
         self._prefix_tokens = None
         self._suffix_tokens = None
+
+        self.max_length = max_length
+        self.batch_size = batch_size
 
         # self.default_instruction = "Find documents that answer the user's question." # Original
         self.default_instruction = "Find documents with relevant information about the query"
@@ -82,15 +54,10 @@ class ChromaReranker:
     def embedding_model(self):
         """Lazy load the embedding model."""
         if self._embedding_model is None:
-            if self.use_mlx:
-                try:
-                    from mlx_lm import load
-                    self._embedding_model, _ = load("kerncore/Qwen3-Embedding-0.6B-MXL-4bit")
-                except Exception as e:
-                    print(f"Warning: Failed to load MLX embedding model: {e}, falling back to standard model")
-                    self.use_mlx = False
-            
-            if not self.use_mlx:
+            if USE_MLX:
+                from mlx_lm import load
+                self._embedding_model, _ = load("kerncore/Qwen3-Embedding-0.6B-MXL-4bit")
+            else:
                 from sentence_transformers import SentenceTransformer
                 self._embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
         return self._embedding_model
@@ -99,9 +66,9 @@ class ChromaReranker:
     def tokenizer(self):
         """Lazy load the tokenizer."""
         if self._tokenizer is None:
-            if self.use_mlx:
-                # Load MLX reranker model to get tokenizer
-                self.reranker_model  # This will load the model and tokenizer
+            if USE_MLX:
+                from mlx_lm import load
+                self._reranker_model, self._tokenizer = load("kerncore/Qwen3-Reranker-0.6B-MLX-4bit")
             else:
                 from transformers import AutoTokenizer
                 self._tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-Reranker-0.6B", padding_side='left')
@@ -111,15 +78,10 @@ class ChromaReranker:
     def reranker_model(self):
         """Lazy load the reranker model."""
         if self._reranker_model is None:
-            if self.use_mlx:
-                try:
-                    from mlx_lm import load
-                    self._reranker_model, self._tokenizer = load("kerncore/Qwen3-Reranker-0.6B-MLX-4bit")
-                except Exception as e:
-                    print(f"Warning: Failed to load MLX reranker model: {e}, falling back to standard model")
-                    self.use_mlx = False
-            
-            if not self.use_mlx:
+            if USE_MLX:
+                from mlx_lm import load
+                self._reranker_model, self._tokenizer = load("kerncore/Qwen3-Reranker-0.6B-MLX-4bit")
+            else:
                 from transformers import AutoModelForCausalLM
                 self._reranker_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-Reranker-0.6B").eval()
         return self._reranker_model
@@ -164,11 +126,27 @@ class ChromaReranker:
 
     def _process_rerank_inputs(self, pairs: list[str]) -> dict:
         """Process input pairs for reranking."""
-        if self.use_mlx:
-            # MLX tokenization needs to be implemented properly
-            raise NotImplementedError("MLX tokenization needs proper implementation")
-        
-        # Standard transformers tokenizer
+        if USE_MLX:
+            raise NotImplementedError
+            # For MLX models, we might need simpler tokenization
+            inputs = {'input_ids': []}
+            for pair in pairs:
+                # MLX models may not support the complex tokenization options
+                tokens = tokenizer.encode(pair)
+                if hasattr(tokens, 'tolist'):
+                    tokens = tokens.tolist()
+                inputs['input_ids'].append(tokens)
+
+            # Pad sequences manually for MLX
+            max_len = max(len(seq) for seq in inputs['input_ids'])
+            for i, seq in enumerate(inputs['input_ids']):
+                if len(seq) < max_len:
+                    # Pad with tokenizer pad token or 0
+                    pad_token = getattr(tokenizer, 'pad_token_id', 0)
+                    inputs['input_ids'][i] = seq + [pad_token] * (max_len - len(seq))
+
+            return inputs
+
         inputs = self.tokenizer(
             pairs,
             padding=False,
@@ -194,14 +172,39 @@ class ChromaReranker:
 
     def _compute_rerank_scores(self, inputs: dict) -> list[float]:
         """Compute reranking scores for processed inputs."""
-        if self.use_mlx:
-            # For MLX models, we need to implement logit extraction properly
-            # This is a placeholder - MLX models should return proper logits
-            # The current implementation is incorrect and needs to be fixed
-            # based on the actual MLX model API
-            raise NotImplementedError("MLX reranking needs proper logit extraction implementation")
-        
-        # Standard PyTorch model
+        if USE_MLX:
+            raise NotImplementedError
+            # MLX model handling
+            import mlx.core as mx
+            import mlx.nn as nn
+            from mlx_lm import generate
+
+            # For MLX models, we might need to use generation instead of direct logits
+            scores = []
+            tokenizer = self.mlx_reranker_tokenizer
+
+            for input_ids in inputs['input_ids']:
+                # Convert to MLX array if needed
+                if not isinstance(input_ids, mx.array):
+                    input_ids = mx.array(input_ids)
+
+                # Generate response for yes/no classification
+                try:
+                    # This is a simplified approach - may need refinement
+                    response = generate(model, tokenizer, prompt="", temp=0.0, max_tokens=1)
+                    # Parse response for yes/no and convert to score
+                    if "yes" in response.lower():
+                        scores.append(0.8)  # High confidence
+                    elif "no" in response.lower():
+                        scores.append(0.2)  # Low confidence
+                    else:
+                        scores.append(0.5)  # Neutral
+                except:
+                    scores.append(0.5)  # Default score if generation fails
+
+            return scores
+
+        import torch
         with torch.no_grad():
             batch_scores = self.reranker_model(**inputs).logits[:, -1, :]
             true_vector = batch_scores[:, self.token_true_id]
@@ -235,11 +238,26 @@ class ChromaReranker:
 
     def _embed_batch(self, texts: list[str], prompt: str = None):
         """Embed a batch of texts."""
-        if self.use_mlx:
-            # MLX embedding needs proper implementation
-            raise NotImplementedError("MLX embedding needs proper implementation")
-        
-        # Standard SentenceTransformer model
+        if USE_MLX:
+            raise NotImplementedError
+            # For now, attempt to use the standard encode method
+            # This may need to be adapted based on the actual MLX model API
+            if hasattr(model, 'encode'):
+                return model.encode(texts, prompt=prompt)
+            else:
+                # Fallback - try to generate embeddings using tokenizer and model directly
+                import numpy as np
+                embeddings = []
+                tokenizer = self.mlx_embedding_tokenizer
+                for text in texts:
+                    input_text = f"{prompt} {text}" if prompt else text
+                    # This is a placeholder - actual implementation depends on MLX model API
+                    tokens = tokenizer.encode(input_text)
+                    # MLX models may need different forward pass
+                    embedding = model(tokens)  # This may need adjustment
+                    embeddings.append(embedding)
+                return np.array(embeddings)
+
         return self.embedding_model.encode(texts, prompt=prompt)
 
     def _rerank_batch(self, pairs: list[str]) -> list[float]:
@@ -263,13 +281,30 @@ class ChromaReranker:
 
         return self._batch_process(documents, self.batch_size, self._embed_batch)
 
-    def compute_similarity(self, query_embeddings, document_embeddings) -> torch.Tensor:
+    def compute_similarity(self, query_embeddings, document_embeddings):
         """Compute cosine similarity matrix between query and document embeddings."""
-        if self.use_mlx:
-            # MLX similarity computation needs proper implementation
-            raise NotImplementedError("MLX similarity computation needs proper implementation")
-        
-        # Standard SentenceTransformer model
+        if USE_MLX:
+            raise NotImplementedError
+            # MLX models may not have similarity method, compute manually
+            import numpy as np
+
+            # Convert to numpy if needed
+            if hasattr(query_embeddings, 'numpy'):
+                query_embeddings = query_embeddings.numpy()
+            if hasattr(document_embeddings, 'numpy'):
+                document_embeddings = document_embeddings.numpy()
+
+            # Compute cosine similarity manually
+            # Normalize embeddings
+            query_norm = query_embeddings / np.linalg.norm(query_embeddings, axis=1, keepdims=True)
+            doc_norm = document_embeddings / np.linalg.norm(document_embeddings, axis=1, keepdims=True)
+
+            # Compute similarity matrix
+            similarity = np.dot(query_norm, doc_norm.T)
+
+            # Convert to torch tensor for compatibility
+            return torch.tensor(similarity)
+
         return self.embedding_model.similarity(query_embeddings, document_embeddings)
 
     def rerank(self, instruction: str, query: str, documents: list[str]) -> list[tuple[str, float]]:
