@@ -127,92 +127,97 @@ class ChromaReranker:
     def _process_rerank_inputs(self, pairs: list[str]) -> dict:
         """Process input pairs for reranking."""
         if USE_MLX:
-            raise NotImplementedError
-            # For MLX models, we might need simpler tokenization
-            inputs = {'input_ids': []}
+            import mlx.core as mx
+            
+            # Process each pair
+            input_ids_list = []
             for pair in pairs:
-                # MLX models may not support the complex tokenization options
-                tokens = tokenizer.encode(pair)
-                if hasattr(tokens, 'tolist'):
-                    tokens = tokens.tolist()
-                inputs['input_ids'].append(tokens)
+                # Tokenize the pair text
+                pair_tokens = self.tokenizer.encode(pair)
+                
+                # Truncate if necessary
+                available_length = self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens)
+                if len(pair_tokens) > available_length:
+                    pair_tokens = pair_tokens[:available_length]
+                
+                # Combine prefix + pair + suffix
+                full_tokens = self.prefix_tokens + pair_tokens + self.suffix_tokens
+                input_ids_list.append(full_tokens)
+            
+            # Pad to same length
+            max_len = max(len(ids) for ids in input_ids_list)
+            padded_ids = []
+            for ids in input_ids_list:
+                # Pad on the left (as torch version uses padding_side='left')
+                padding_length = max_len - len(ids)
+                padded = [self.tokenizer._tokenizer.pad_token_id] * padding_length + ids
+                padded_ids.append(padded)
+            
+            # Convert to MLX array
+            input_ids = mx.array(padded_ids)
+            return {'input_ids': input_ids}
+        else:
+            inputs = self.tokenizer(
+                pairs,
+                padding=False,
+                truncation='longest_first',
+                return_attention_mask=False,
+                max_length=self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens),
+            )
 
-            # Pad sequences manually for MLX
-            max_len = max(len(seq) for seq in inputs['input_ids'])
-            for i, seq in enumerate(inputs['input_ids']):
-                if len(seq) < max_len:
-                    # Pad with tokenizer pad token or 0
-                    pad_token = getattr(tokenizer, 'pad_token_id', 0)
-                    inputs['input_ids'][i] = seq + [pad_token] * (max_len - len(seq))
+            # Add prefix and suffix tokens
+            for i, ele in enumerate(inputs['input_ids']):
+                inputs['input_ids'][i] = self.prefix_tokens + ele + self.suffix_tokens
+
+            maxlen = max(len(x) for x in inputs['input_ids'])
+
+            # Pad and convert to tensors
+            inputs = self.tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=maxlen)
+
+            # Move to model device
+            for key in inputs:
+                inputs[key] = inputs[key].to(self.reranker_model.device)
 
             return inputs
-
-        inputs = self.tokenizer(
-            pairs,
-            padding=False,
-            truncation='longest_first',
-            return_attention_mask=False,
-            max_length=self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens),
-        )
-
-        # Add prefix and suffix tokens
-        for i, ele in enumerate(inputs['input_ids']):
-            inputs['input_ids'][i] = self.prefix_tokens + ele + self.suffix_tokens
-
-        maxlen = max(len(x) for x in inputs['input_ids'])
-
-        # Pad and convert to tensors
-        inputs = self.tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=maxlen)
-
-        # Move to model device
-        for key in inputs:
-            inputs[key] = inputs[key].to(self.reranker_model.device)
-
-        return inputs
 
     def _compute_rerank_scores(self, inputs: dict) -> list[float]:
         """Compute reranking scores for processed inputs."""
         if USE_MLX:
-            raise NotImplementedError
-            # MLX model handling
             import mlx.core as mx
             import mlx.nn as nn
-            from mlx_lm import generate
-
-            # For MLX models, we might need to use generation instead of direct logits
-            scores = []
-            tokenizer = self.mlx_reranker_tokenizer
-
-            for input_ids in inputs['input_ids']:
-                # Convert to MLX array if needed
-                if not isinstance(input_ids, mx.array):
-                    input_ids = mx.array(input_ids)
-
-                # Generate response for yes/no classification
-                try:
-                    # This is a simplified approach - may need refinement
-                    response = generate(model, tokenizer, prompt="", temp=0.0, max_tokens=1)
-                    # Parse response for yes/no and convert to score
-                    if "yes" in response.lower():
-                        scores.append(0.8)  # High confidence
-                    elif "no" in response.lower():
-                        scores.append(0.2)  # Low confidence
-                    else:
-                        scores.append(0.5)  # Neutral
-                except:
-                    scores.append(0.5)  # Default score if generation fails
-
-            return scores
-
-        import torch
-        with torch.no_grad():
-            batch_scores = self.reranker_model(**inputs).logits[:, -1, :]
-            true_vector = batch_scores[:, self.token_true_id]
-            false_vector = batch_scores[:, self.token_false_id]
-            batch_scores = torch.stack([false_vector, true_vector], dim=1)
-            batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
-            scores = batch_scores[:, 1].exp().tolist()
-            return scores
+            import numpy as np
+            
+            # Run model inference
+            input_ids = inputs['input_ids']
+            logits = self.reranker_model(input_ids)
+            
+            # Get logits for the last token position
+            last_token_logits = logits[:, -1, :]  # Shape: (batch_size, vocab_size)
+            
+            # Extract logits for 'yes' and 'no' tokens
+            true_logits = last_token_logits[:, self.token_true_id]
+            false_logits = last_token_logits[:, self.token_false_id]
+            
+            # Stack and apply log_softmax
+            stacked_logits = mx.stack([false_logits, true_logits], axis=1)
+            log_probs = nn.log_softmax(stacked_logits, axis=1)
+            
+            # Get probabilities for 'yes' (index 1)
+            scores = mx.exp(log_probs[:, 1])
+            
+            # Convert to float32 then numpy and return as list
+            scores_float = scores.astype(mx.float32)
+            return np.asarray(scores_float).tolist()
+        else:
+            import torch
+            with torch.no_grad():
+                batch_scores = self.reranker_model(**inputs).logits[:, -1, :]
+                true_vector = batch_scores[:, self.token_true_id]
+                false_vector = batch_scores[:, self.token_false_id]
+                batch_scores = torch.stack([false_vector, true_vector], dim=1)
+                batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+                scores = batch_scores[:, 1].exp().tolist()
+                return scores
 
     def _batch_process(self, items: list, batch_size: int, process_func, *args, **kwargs):
         """Generic function to process items in batches."""
@@ -239,26 +244,44 @@ class ChromaReranker:
     def _embed_batch(self, texts: list[str], prompt: str = None):
         """Embed a batch of texts."""
         if USE_MLX:
-            raise NotImplementedError
-            # For now, attempt to use the standard encode method
-            # This may need to be adapted based on the actual MLX model API
-            if hasattr(model, 'encode'):
-                return model.encode(texts, prompt=prompt)
-            else:
-                # Fallback - try to generate embeddings using tokenizer and model directly
-                import numpy as np
-                embeddings = []
-                tokenizer = self.mlx_embedding_tokenizer
-                for text in texts:
-                    input_text = f"{prompt} {text}" if prompt else text
-                    # This is a placeholder - actual implementation depends on MLX model API
-                    tokens = tokenizer.encode(input_text)
-                    # MLX models may need different forward pass
-                    embedding = model(tokens)  # This may need adjustment
-                    embeddings.append(embedding)
-                return np.array(embeddings)
-
-        return self.embedding_model.encode(texts, prompt=prompt)
+            import mlx.core as mx
+            import numpy as np
+            
+            # Get the inner transformer model (not the LM head)
+            transformer_model = self.embedding_model['model']
+            
+            # Process each text
+            embeddings_list = []
+            for text in texts:
+                # Add prompt if provided
+                if prompt:
+                    full_text = prompt + " " + text
+                else:
+                    full_text = text
+                    
+                # Tokenize
+                token_ids = self.tokenizer.encode(full_text)
+                input_ids = mx.array([token_ids])  # Add batch dimension
+                
+                # Run full transformer forward pass (without LM head)
+                # This gives us hidden states, not logits
+                hidden_states = transformer_model(input_ids)
+                
+                # Use last token pooling (matching sentence-transformers config)
+                # hidden_states shape should be [batch_size, seq_len, hidden_dim]
+                last_token_embedding = hidden_states[0, -1, :]  # Get last token of first (only) sequence
+                
+                # Normalize to unit vector (matching sentence-transformers Normalize layer)
+                normalized_embedding = last_token_embedding / mx.linalg.norm(last_token_embedding)
+                
+                embeddings_list.append(normalized_embedding)
+            
+            # Stack all embeddings and convert to numpy
+            embeddings = mx.stack(embeddings_list, axis=0)
+            embeddings_float = embeddings.astype(mx.float32)
+            return np.asarray(embeddings_float)
+        else:
+            return self.embedding_model.encode(texts, prompt=prompt)
 
     def _rerank_batch(self, pairs: list[str]) -> list[float]:
         """Rerank a batch of text pairs."""
@@ -270,42 +293,37 @@ class ChromaReranker:
         prompt = self._format_embed_prompt(instruction) if instruction else None
 
         if len(queries) <= self.batch_size:
-            return self.embedding_model.encode(queries, prompt=prompt)
+            return self._embed_batch(queries, prompt)
 
         return self._batch_process(queries, self.batch_size, self._embed_batch, prompt)
 
     def embed_documents(self, documents: list[str]):
         """Embed documents."""
         if len(documents) <= self.batch_size:
-            return self.embedding_model.encode(documents)
+            return self._embed_batch(documents)
 
         return self._batch_process(documents, self.batch_size, self._embed_batch)
 
     def compute_similarity(self, query_embeddings, document_embeddings):
         """Compute cosine similarity matrix between query and document embeddings."""
         if USE_MLX:
-            raise NotImplementedError
-            # MLX models may not have similarity method, compute manually
+            import mlx.core as mx
             import numpy as np
-
-            # Convert to numpy if needed
-            if hasattr(query_embeddings, 'numpy'):
-                query_embeddings = query_embeddings.numpy()
-            if hasattr(document_embeddings, 'numpy'):
-                document_embeddings = document_embeddings.numpy()
-
-            # Compute cosine similarity manually
+            
+            # Convert to MLX arrays
+            queries = mx.array(query_embeddings)
+            docs = mx.array(document_embeddings)
+            
             # Normalize embeddings
-            query_norm = query_embeddings / np.linalg.norm(query_embeddings, axis=1, keepdims=True)
-            doc_norm = document_embeddings / np.linalg.norm(document_embeddings, axis=1, keepdims=True)
-
-            # Compute similarity matrix
-            similarity = np.dot(query_norm, doc_norm.T)
-
-            # Convert to torch tensor for compatibility
-            return torch.tensor(similarity)
-
-        return self.embedding_model.similarity(query_embeddings, document_embeddings)
+            queries_norm = queries / mx.linalg.norm(queries, axis=1, keepdims=True)
+            docs_norm = docs / mx.linalg.norm(docs, axis=1, keepdims=True)
+            
+            # Compute cosine similarity
+            similarity = mx.matmul(queries_norm, docs_norm.T)
+            
+            return np.array(similarity)
+        else:
+            return self.embedding_model.similarity(query_embeddings, document_embeddings)
 
     def rerank(self, instruction: str, query: str, documents: list[str]) -> list[tuple[str, float]]:
         """

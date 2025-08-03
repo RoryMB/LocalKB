@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "LocalKB"
-version = "1.1.0"
+version = "1.1.1"
 description = "An MCP server for local knowledge base operations"
 authors = [
     { name="Rory Butler" },
@@ -21,6 +21,7 @@ dependencies = [
     "chromadb",
     "mcp",
     "mlx-lm",
+    "mlx",
     "numpy",
     "semantic-text-splitter",
     "sentence-transformers",
