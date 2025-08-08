@@ -9,6 +9,16 @@ os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 
 USE_MLX = platform.system() == 'Darwin' and platform.machine() == 'arm64'
 
+def _get_device():
+    """Get the best available device for model inference."""
+    import torch
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
+
 
 class ChromaReranker:
     """
@@ -38,6 +48,7 @@ class ChromaReranker:
 
         self.max_length = max_length
         self.batch_size = batch_size
+        self._device = _get_device()
 
         # self.default_instruction = "Find documents that answer the user's question." # Original
         self.default_instruction = "Find documents with relevant information about the query"
@@ -60,6 +71,8 @@ class ChromaReranker:
             else:
                 from sentence_transformers import SentenceTransformer
                 self._embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
+                if self._device is not None and self._device.type != 'cpu':
+                    self._embedding_model = self._embedding_model.to(self._device)
         return self._embedding_model
 
     @property
@@ -84,6 +97,8 @@ class ChromaReranker:
             else:
                 from transformers import AutoModelForCausalLM
                 self._reranker_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-Reranker-0.6B").eval()
+                if self._device is not None:
+                    self._reranker_model = self._reranker_model.to(self._device)
         return self._reranker_model
 
     @property
@@ -128,22 +143,22 @@ class ChromaReranker:
         """Process input pairs for reranking."""
         if USE_MLX:
             import mlx.core as mx
-            
+
             # Process each pair
             input_ids_list = []
             for pair in pairs:
                 # Tokenize the pair text
                 pair_tokens = self.tokenizer.encode(pair)
-                
+
                 # Truncate if necessary
                 available_length = self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens)
                 if len(pair_tokens) > available_length:
                     pair_tokens = pair_tokens[:available_length]
-                
+
                 # Combine prefix + pair + suffix
                 full_tokens = self.prefix_tokens + pair_tokens + self.suffix_tokens
                 input_ids_list.append(full_tokens)
-            
+
             # Pad to same length
             max_len = max(len(ids) for ids in input_ids_list)
             padded_ids = []
@@ -152,7 +167,7 @@ class ChromaReranker:
                 padding_length = max_len - len(ids)
                 padded = [self.tokenizer._tokenizer.pad_token_id] * padding_length + ids
                 padded_ids.append(padded)
-            
+
             # Convert to MLX array
             input_ids = mx.array(padded_ids)
             return {'input_ids': input_ids}
@@ -175,8 +190,9 @@ class ChromaReranker:
             inputs = self.tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=maxlen)
 
             # Move to model device
-            for key in inputs:
-                inputs[key] = inputs[key].to(self.reranker_model.device)
+            if self._device is not None:
+                for key in inputs:
+                    inputs[key] = inputs[key].to(self._device)
 
             return inputs
 
@@ -186,25 +202,25 @@ class ChromaReranker:
             import mlx.core as mx
             import mlx.nn as nn
             import numpy as np
-            
+
             # Run model inference
             input_ids = inputs['input_ids']
             logits = self.reranker_model(input_ids)
-            
+
             # Get logits for the last token position
             last_token_logits = logits[:, -1, :]  # Shape: (batch_size, vocab_size)
-            
+
             # Extract logits for 'yes' and 'no' tokens
             true_logits = last_token_logits[:, self.token_true_id]
             false_logits = last_token_logits[:, self.token_false_id]
-            
+
             # Stack and apply log_softmax
             stacked_logits = mx.stack([false_logits, true_logits], axis=1)
             log_probs = nn.log_softmax(stacked_logits, axis=1)
-            
+
             # Get probabilities for 'yes' (index 1)
             scores = mx.exp(log_probs[:, 1])
-            
+
             # Convert to float32 then numpy and return as list
             scores_float = scores.astype(mx.float32)
             return np.asarray(scores_float).tolist()
@@ -246,10 +262,10 @@ class ChromaReranker:
         if USE_MLX:
             import mlx.core as mx
             import numpy as np
-            
+
             # Get the inner transformer model (not the LM head)
             transformer_model = self.embedding_model['model']
-            
+
             # Process each text
             embeddings_list = []
             for text in texts:
@@ -258,24 +274,24 @@ class ChromaReranker:
                     full_text = prompt + " " + text
                 else:
                     full_text = text
-                    
+
                 # Tokenize
                 token_ids = self.tokenizer.encode(full_text)
                 input_ids = mx.array([token_ids])  # Add batch dimension
-                
+
                 # Run full transformer forward pass (without LM head)
                 # This gives us hidden states, not logits
                 hidden_states = transformer_model(input_ids)
-                
+
                 # Use last token pooling (matching sentence-transformers config)
                 # hidden_states shape should be [batch_size, seq_len, hidden_dim]
                 last_token_embedding = hidden_states[0, -1, :]  # Get last token of first (only) sequence
-                
+
                 # Normalize to unit vector (matching sentence-transformers Normalize layer)
                 normalized_embedding = last_token_embedding / mx.linalg.norm(last_token_embedding)
-                
+
                 embeddings_list.append(normalized_embedding)
-            
+
             # Stack all embeddings and convert to numpy
             embeddings = mx.stack(embeddings_list, axis=0)
             embeddings_float = embeddings.astype(mx.float32)
@@ -309,18 +325,18 @@ class ChromaReranker:
         if USE_MLX:
             import mlx.core as mx
             import numpy as np
-            
+
             # Convert to MLX arrays
             queries = mx.array(query_embeddings)
             docs = mx.array(document_embeddings)
-            
+
             # Normalize embeddings
             queries_norm = queries / mx.linalg.norm(queries, axis=1, keepdims=True)
             docs_norm = docs / mx.linalg.norm(docs, axis=1, keepdims=True)
-            
+
             # Compute cosine similarity
             similarity = mx.matmul(queries_norm, docs_norm.T)
-            
+
             return np.array(similarity)
         else:
             return self.embedding_model.similarity(query_embeddings, document_embeddings)
